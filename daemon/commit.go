@@ -173,7 +173,7 @@ func (daemon *Daemon) Commit(name string, c *backend.ContainerCommitConfig) (str
 		osFeatures = img.OSFeatures
 	}
 
-	l, err := daemon.layerStore.Register(rwTar, rootFS.ChainID())
+	l, err := daemon.layerStore.Register(rwTar, rootFS.ChainID(), "")
 	if err != nil {
 		return "", err
 	}

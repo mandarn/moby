@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"time"
+	"strings"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution"
@@ -99,22 +100,40 @@ func (ldm *LayerDownloadManager) Download(ctx context.Context, initialRootFS ima
 	)
 
 	rootFS := initialRootFS
+	logrus.Debugf("RootFS: %v, layers: %v", rootFS, layers)
 	for _, descriptor := range layers {
+		var lDiffID layer.DiffID
+		logrus.Debugf("Download descriptor diffID: %v", descriptor) 
 		key := descriptor.Key()
 		transferKey += key
 
 		if !missingLayer {
 			missingLayer = true
 			diffID, err := descriptor.DiffID()
+			lDiffID = diffID
 			if err == nil {
 				getRootFS := rootFS
 				getRootFS.Append(diffID)
-				l, err := ldm.layerStore.Get(getRootFS.ChainID())
-				if err == nil {
+				curDiffID := lDiffID
+				lDiffIDs := strings.Split(lDiffID.String(), ":")
+				lDiffID = layer.DiffID(lDiffIDs[1])
+				lChainID := rootFS.ChainID()
+				logrus.Debugf("aoComment: Exists: %s ", lDiffID)
+				ok := ldm.layerStore.Exists(lDiffID)
+				if ok {
+					logrus.Debugf("Layer: %s exists on GraphDriver", lDiffID)
+					err = ldm.layerStore.Add(curDiffID, rootFS.ChainID())
+					if err != nil {
+						logrus.Debugf("aoComment: Adding layer did not work")
+					}
+				}
+
+				l, err := ldm.layerStore.Get(lChainID)
+				if err == nil || ok {
 					// Layer already exists.
 					logrus.Debugf("Layer already exists: %s", descriptor.ID())
 					progress.Update(progressOutput, descriptor.ID(), "Already exists")
-					if topLayer != nil {
+					if err == nil && topLayer != nil {
 						layer.ReleaseAndLog(ldm.layerStore, topLayer)
 					}
 					topLayer = l
@@ -140,11 +159,16 @@ func (ldm *LayerDownloadManager) Download(ctx context.Context, initialRootFS ima
 		progress.Update(progressOutput, descriptor.ID(), "Pulling fs layer")
 
 		var xferFunc DoFunc
+		diffId, _ := descriptor.DiffID()
 		if topDownload != nil {
-			xferFunc = ldm.makeDownloadFunc(descriptor, "", topDownload)
+			logrus.Debugf("aoComment: makeDownloadFunc call lDiffID:%s key:%s diffid:%s",
+					lDiffID, descriptor.Key(), diffId)
+			xferFunc = ldm.makeDownloadFunc(descriptor, "", "", topDownload)
 			defer topDownload.Transfer.Release(watcher)
 		} else {
-			xferFunc = ldm.makeDownloadFunc(descriptor, rootFS.ChainID(), nil)
+			logrus.Debugf("aoComment: makeDownloadFunc call lDiffID:%s key:%s diffid:%s rootChain:%s",
+					lDiffID, descriptor.Key(), diffId, rootFS.ChainID())
+			xferFunc = ldm.makeDownloadFunc(descriptor, rootFS.ChainID(), "", nil)
 		}
 		topDownloadUncasted, watcher = ldm.tm.Transfer(transferKey, xferFunc, progressOutput)
 		topDownload = topDownloadUncasted.(*downloadTransfer)
@@ -201,7 +225,7 @@ func (ldm *LayerDownloadManager) Download(ctx context.Context, initialRootFS ima
 // complete before the registration step, and registers the downloaded data
 // on top of parentDownload's resulting layer. Otherwise, it registers the
 // layer on top of the ChainID given by parentLayer.
-func (ldm *LayerDownloadManager) makeDownloadFunc(descriptor DownloadDescriptor, parentLayer layer.ChainID, parentDownload *downloadTransfer) DoFunc {
+func (ldm *LayerDownloadManager) makeDownloadFunc(descriptor DownloadDescriptor, parentLayer layer.ChainID, lDiffID layer.DiffID, parentDownload *downloadTransfer) DoFunc {
 	return func(progressChan chan<- progress.Progress, start <-chan struct{}, inactive chan<- struct{}) Transfer {
 		d := &downloadTransfer{
 			Transfer:   NewTransfer(),
@@ -323,10 +347,14 @@ func (ldm *LayerDownloadManager) makeDownloadFunc(descriptor DownloadDescriptor,
 			if fs, ok := descriptor.(distribution.Describable); ok {
 				src = fs.Descriptor()
 			}
+
 			if ds, ok := d.layerStore.(layer.DescribableStore); ok {
+				logrus.Debugf("aoComment: Describable descriptor %v id:%s", src, lDiffID)
 				d.layer, err = ds.RegisterWithDescriptor(inflatedLayerData, parentLayer, src)
 			} else {
-				d.layer, err = d.layerStore.Register(inflatedLayerData, parentLayer)
+				logrus.Debugf("aoComment: Non describable descriptor %v key: %s id: %s diffid:%v",
+						src, descriptor.Key(), descriptor.ID(), lDiffID)
+				d.layer, err = d.layerStore.Register(inflatedLayerData, parentLayer,"")
 			}
 			if err != nil {
 				select {
@@ -422,10 +450,14 @@ func (ldm *LayerDownloadManager) makeDownloadFuncFromDownload(descriptor Downloa
 			if fs, ok := l.(distribution.Describable); ok {
 				src = fs.Descriptor()
 			}
+
+			diffID := l.ChainID().String()
+			diffIDs := strings.Split(diffID, ":")
 			if ds, ok := d.layerStore.(layer.DescribableStore); ok {
 				d.layer, err = ds.RegisterWithDescriptor(layerReader, parentLayer, src)
 			} else {
-				d.layer, err = d.layerStore.Register(layerReader, parentLayer)
+				logrus.Debugf("makeDownloadFuncFromDownload: non descriabable diffID: %s", diffIDs)
+				d.layer, err = d.layerStore.Register(layerReader, parentLayer, diffIDs[1])
 			}
 			if err != nil {
 				d.err = fmt.Errorf("failed to register layer: %v", err)

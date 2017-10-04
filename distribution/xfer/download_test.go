@@ -86,11 +86,11 @@ func (ls *mockLayerStore) Map() map[layer.ChainID]layer.Layer {
 	return layers
 }
 
-func (ls *mockLayerStore) Register(reader io.Reader, parentID layer.ChainID) (layer.Layer, error) {
-	return ls.RegisterWithDescriptor(reader, parentID, distribution.Descriptor{})
+func (ls *mockLayerStore) Register(reader io.Reader, parentID layer.ChainID, layerID string) (layer.Layer, error) {
+	return ls.RegisterWithDescriptor(reader, parentID, layerID, distribution.Descriptor{})
 }
 
-func (ls *mockLayerStore) RegisterWithDescriptor(reader io.Reader, parentID layer.ChainID, _ distribution.Descriptor) (layer.Layer, error) {
+func (ls *mockLayerStore) RegisterWithDescriptor(reader io.Reader, parentID layer.ChainID, layerID string, _ distribution.Descriptor) (layer.Layer, error) {
 	var (
 		parent layer.Layer
 		err    error

@@ -172,9 +172,11 @@ type MountInit func(root string) error
 // Store represents a backend for managing both
 // read-only and read-write layers.
 type Store interface {
-	Register(io.Reader, ChainID) (Layer, error)
+	Register(io.Reader, ChainID, string) (Layer, error)
+	Add(DiffID, ChainID) error
 	Get(ChainID) (Layer, error)
 	Map() map[ChainID]Layer
+	Exists(DiffID) (bool)
 	Release(Layer) ([]Metadata, error)
 
 	CreateRWLayer(id string, parent ChainID, mountLabel string, initFunc MountInit, storageOpt map[string]string) (RWLayer, error)

@@ -6,6 +6,8 @@ import (
 	"io"
 	"io/ioutil"
 	"sync"
+	"bytes"
+	"strings"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/distribution"
@@ -237,17 +239,78 @@ func (ls *layerStore) applyTar(tx MetadataTransaction, ts io.Reader, parent stri
 	return nil
 }
 
-func (ls *layerStore) Register(ts io.Reader, parent ChainID) (Layer, error) {
-	return ls.registerWithDescriptor(ts, parent, distribution.Descriptor{})
+func (ls *layerStore) Register(ts io.Reader, parent ChainID, layer string) (Layer, error) {
+	return ls.registerWithDescriptor(ts, parent, layer, distribution.Descriptor{})
 }
 
-func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, descriptor distribution.Descriptor) (Layer, error) {
+func (ls *layerStore) Add(diffID DiffID, parent ChainID) error {
+	
+	var p *roLayer
+	var pid string
+
+	if string(parent) != "" {
+		p = ls.get(parent)
+		if p == nil {
+			return ErrLayerDoesNotExist
+		}
+
+		pid = p.cacheID
+	}
+
+	// Create new roLayer
+	diffIDs := strings.Split(diffID.String(), ":")
+	layer := &roLayer{
+		parent:         p,
+		cacheID:        diffIDs[1],
+		referenceCount: 1,
+		layerStore:     ls,
+		references:     map[Layer]struct{}{},
+		descriptor:     distribution.Descriptor{},
+	}
+
+	if err := ls.driver.Create(layer.cacheID, pid, nil); err != nil {
+		return err
+	}
+
+	layer.diffID = diffID
+
+	tx, err := ls.store.StartTransaction()
+	if err != nil {
+		return err
+	}
+
+	if layer.parent == nil {
+		layer.chainID = ChainID(layer.diffID)
+	} else {
+		layer.chainID = createChainIDFromParent(layer.parent.chainID, layer.diffID)
+	}
+
+	if err = storeLayer(tx, layer); err != nil {
+		return err
+	}
+
+	ls.layerL.Lock()
+	defer ls.layerL.Unlock()
+
+	if err = tx.Commit(layer.chainID); err != nil {
+		return err
+	}
+
+	ls.layerMap[layer.chainID] = layer
+
+	return err
+}
+
+
+func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, layerID string, descriptor distribution.Descriptor) (Layer, error) {
 	// err is used to hold the error which will always trigger
 	// cleanup of creates sources but may not be an error returned
 	// to the caller (already exists).
 	var err error
-	var pid string
+	var pid, cacheID string
 	var p *roLayer
+	var rdr io.Reader
+
 	if string(parent) != "" {
 		p = ls.get(parent)
 		if p == nil {
@@ -268,16 +331,41 @@ func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, descr
 		}
 	}
 
+	var readBytes []byte
+	if string(layerID) != "" {
+		cacheID = layerID
+		rdr = ts
+	} else {
+		digester := digest.Canonical.New()
+		rdr = io.TeeReader(ts, digester.Hash())
+
+		readBytes, err = ioutil.ReadAll(rdr)
+		if err != nil {
+			logrus.Debugf("aoComment: readBytes error %v", err)
+		}
+		cacheIDStr := digester.Digest().String()
+		cacheIDs := strings.Split(cacheIDStr, ":")
+		if len(cacheIDs) > 1 {
+			cacheID = cacheIDs[1]
+		} else {
+			cacheID = stringid.GenerateRandomID()
+		}
+
+		logrus.Debugf("cacheID: %s", cacheID)
+		rdr = bytes.NewReader(readBytes)
+	}
+
 	// Create new roLayer
 	layer := &roLayer{
 		parent:         p,
-		cacheID:        stringid.GenerateRandomID(),
+		cacheID:        cacheID,
 		referenceCount: 1,
 		layerStore:     ls,
 		references:     map[Layer]struct{}{},
 		descriptor:     descriptor,
 	}
 
+	logrus.Debugf("layer.cacheID: %s", cacheID)	
 	if err = ls.driver.Create(layer.cacheID, pid, nil); err != nil {
 		return nil, err
 	}
@@ -299,7 +387,7 @@ func (ls *layerStore) registerWithDescriptor(ts io.Reader, parent ChainID, descr
 		}
 	}()
 
-	if err = ls.applyTar(tx, ts, pid, layer); err != nil {
+	if err = ls.applyTar(tx, rdr, pid, layer); err != nil {
 		return nil, err
 	}
 
@@ -346,6 +434,11 @@ func (ls *layerStore) get(l ChainID) *roLayer {
 	ls.layerL.Lock()
 	defer ls.layerL.Unlock()
 	return ls.getWithoutLock(l)
+}
+
+func (ls *layerStore) Exists(l DiffID) bool {
+	ok := ls.driver.Exists(l.String())
+	return ok
 }
 
 func (ls *layerStore) Get(l ChainID) (Layer, error) {
